@@ -1,0 +1,7 @@
+# Python dependencies for srt-maker.py
+# ffmpeg and ffprobe must also be installed separately and available on PATH.
+pytubefix
+stable-ts
+demucs
+librosa
+translate
