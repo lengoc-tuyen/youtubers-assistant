@@ -10,6 +10,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+DEFAULT_USER_AGENT = "youtubers-assistant/1.0"
+
+
 @dataclass(frozen=True)
 class RetryPolicy:
     """Network retry limits. Retries are intentionally finite."""
@@ -33,6 +36,7 @@ class OpenAICompatibleJsonClient:
         model: str,
         timeout_seconds: float = 30.0,
         retry_policy: RetryPolicy = RetryPolicy(),
+        user_agent: str = DEFAULT_USER_AGENT,
         opener: Callable[..., Any] = urlopen,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -42,11 +46,14 @@ class OpenAICompatibleJsonClient:
             raise ValueError("Provider API key and model are required.")
         if timeout_seconds <= 0 or retry_policy.attempts < 1:
             raise ValueError("Timeout and retry attempts must be positive.")
+        if not user_agent.strip():
+            raise ValueError("Provider user agent is required.")
         self._endpoint = endpoint
         self._api_key = api_key
         self._model = model
         self._timeout_seconds = timeout_seconds
         self._retry_policy = retry_policy
+        self._user_agent = user_agent
         self._opener = opener
         self._sleep = sleep
 
@@ -73,6 +80,7 @@ class OpenAICompatibleJsonClient:
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                     "Accept": "application/json",
+                    "User-Agent": self._user_agent,
                 },
                 method="POST",
             )
