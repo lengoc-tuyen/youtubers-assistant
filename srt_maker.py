@@ -24,6 +24,7 @@ DEFAULT_LANGUAGE = "en"
 DEFAULT_DEMUCS_MODEL = "htdemucs"
 DEFAULT_DEMUCS_SEGMENT = 7
 DEFAULT_DEMUCS_OVERLAP = 0.25
+DEFAULT_YOUTUBE_CLIENT = "WEB"
 
 # Activity / subtitle clamping (from notebook)
 DEFAULT_TOP_DB = 30
@@ -163,18 +164,29 @@ def is_youtube_url(value: str) -> bool:
 def download_youtube(url: str, out_path: Path) -> Path:
     try:
         from pytubefix import YouTube
+        from pytubefix.exceptions import BotDetection, PytubeFixError
     except ImportError:
-        sys.exit("❌ pytubefix not installed. Run: pip install pytubefix")
+        raise RuntimeError("pytubefix is not installed. Run: pip install -r requirements.txt")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"⏳ Downloading audio from YouTube → {out_path}")
-    yt = YouTube(url)
-    stream = yt.streams.filter(only_audio=True).first()
-    if not stream:
-        sys.exit("❌ No audio stream found for this URL.")
-    stream.download(output_path=str(out_path.parent), filename=out_path.name)
+    try:
+        # The WEB client lets pytubefix generate a PO token automatically when needed.
+        yt = YouTube(url, DEFAULT_YOUTUBE_CLIENT)
+        stream = yt.streams.filter(only_audio=True).first()
+        if not stream:
+            raise RuntimeError("No audio stream was available for this YouTube video.")
+        stream.download(output_path=str(out_path.parent), filename=out_path.name)
+    except BotDetection as error:
+        raise RuntimeError(
+            "YouTube blocked this runtime as automated traffic. "
+            "The downloader already uses pytubefix's WEB/automatic PO-token client; "
+            "try a non-datacenter network or a permitted proxy.",
+        ) from error
+    except PytubeFixError as error:
+        raise RuntimeError(f"YouTube audio download failed: {error}") from error
     if not out_path.exists() or out_path.stat().st_size == 0:
-        sys.exit("❌ Download failed or produced an empty file.")
+        raise RuntimeError("YouTube download failed or produced an empty file.")
     print(f"✅ Downloaded: {out_path}")
     return out_path
 
@@ -740,7 +752,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     if not youtube_url:
         sys.exit("❌ No YouTube video URL provided.")
 
-    source = resolve_youtube_source(youtube_url, data_dir)
+    try:
+        source = resolve_youtube_source(youtube_url, data_dir)
+    except RuntimeError as error:
+        sys.exit(f"❌ {error}")
 
     # Whisper / alignment audio: mono 16 kHz
     whisper_wav = data_dir / "yt_input.wav"
