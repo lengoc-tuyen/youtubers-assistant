@@ -25,12 +25,17 @@ class TranslationValidationError(ValueError):
         return self.message
 
 
+def get_translation_items(payload: Mapping[str, Any]) -> Any:
+    """Return the provider's translation array, including the legacy alias."""
+    return payload.get("lines", payload.get("translations"))
+
+
 def validate_translation_response(
     payload: Mapping[str, Any],
     canonical_lines: Sequence[CanonicalLyricLine],
 ) -> Tuple[TranslationLine, ...]:
     """Validate strict Groq JSON and return translations ordered by canonical ID."""
-    response_lines = payload.get("lines")
+    response_lines = get_translation_items(payload)
     if not isinstance(response_lines, list):
         raise TranslationValidationError("Translation response must contain a lines array.")
 

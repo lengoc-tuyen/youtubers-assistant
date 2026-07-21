@@ -6,10 +6,14 @@ from collections import Counter
 from typing import Any, Callable, Dict, Mapping, Protocol, Sequence, Tuple
 
 from bilingual_models import BilingualCue, CanonicalLyricLine, TranslationLine
-from translation_workflow import TranslationValidationError, validate_translation_response
+from translation_workflow import (
+    TranslationValidationError,
+    get_translation_items,
+    validate_translation_response,
+)
 
 
-GROQ_PROMPT_VERSION = "2026-07-english-vietnamese-lyrics-v1"
+GROQ_PROMPT_VERSION = "2026-07-english-vietnamese-lyrics-v2"
 GROQ_SYSTEM_PROMPT = """You are an expert English-to-Vietnamese lyric translator and subtitle adapter.
 
 Read the entire song before translating so that every line is interpreted using the full-song context.
@@ -22,7 +26,12 @@ Translate the intended effect rather than individual words when a literal transl
 
 Keep repeated source lines translated consistently unless their context clearly changes.
 
-Return exactly one Vietnamese translation for every input ID. Do not merge, split, omit, duplicate, reorder, or create lines. Do not add parentheses, timestamps, English text, explanations, markdown, or commentary. Return valid JSON only."""
+Return exactly one Vietnamese translation for every input ID. Do not merge, split, omit, duplicate, reorder, or create lines. Do not add parentheses, timestamps, English text, explanations, markdown, or commentary.
+
+Return valid JSON only, with this exact root shape:
+{"lines":[{"id":1,"translation":"Vietnamese translation"}]}
+
+The root array key must be named "lines", never "translations". Every output item must contain exactly one integer input ID and one non-empty Vietnamese "translation" string."""
 
 class JsonTranslationClient(Protocol):
     """An injected OpenAI-compatible JSON client; implementations own HTTP concerns."""
@@ -59,7 +68,7 @@ def _extract_valid_translations(
     canonical_lines: Sequence[CanonicalLyricLine],
 ) -> Dict[int, str]:
     """Keep only unambiguous valid responses while preparing a partial retry."""
-    response_lines = payload.get("lines")
+    response_lines = get_translation_items(payload)
     if not isinstance(response_lines, list):
         return {}
     expected_ids = {line.id for line in canonical_lines}
