@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 
 from bilingual_models import AlignedLyricLine, CanonicalLyricLine
@@ -25,6 +26,7 @@ DEFAULT_DEMUCS_MODEL = "htdemucs"
 DEFAULT_DEMUCS_SEGMENT = 7
 DEFAULT_DEMUCS_OVERLAP = 0.25
 DEFAULT_YOUTUBE_CLIENT = "WEB"
+LOCAL_VIDEO_FALLBACK_NAME = "video.mp4"
 
 # Activity / subtitle clamping (from notebook)
 DEFAULT_TOP_DB = 30
@@ -161,7 +163,30 @@ def is_youtube_url(value: str) -> bool:
 
     return False
 
+def find_local_video_fallback() -> Optional[Path]:
+    """Find a user-uploaded ``video.mp4`` beside the runner or this script."""
+    candidates = (Path.cwd() / LOCAL_VIDEO_FALLBACK_NAME, Path(__file__).parent / LOCAL_VIDEO_FALLBACK_NAME)
+    for candidate in candidates:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+    return None
+
+
+def use_local_video_fallback(out_path: Path, reason: str) -> Path:
+    """Transcode a user-provided MP4 after remote YouTube media is unavailable."""
+    local_video = find_local_video_fallback()
+    if local_video:
+        print(f"⚠️  {reason} Using local fallback: {local_video}")
+        return convert_to_mp3(local_video, out_path)
+    locations = ", ".join(str(path) for path in (
+        Path.cwd() / LOCAL_VIDEO_FALLBACK_NAME,
+        Path(__file__).parent / LOCAL_VIDEO_FALLBACK_NAME,
+    ))
+    raise RuntimeError(f"{reason} No uploaded video.mp4 was found at: {locations}")
+
+
 def download_youtube(url: str, out_path: Path) -> Path:
+    """Use audio stream, remote MP4, then an uploaded ``video.mp4`` in that order."""
     try:
         from pytubefix import YouTube
         from pytubefix.exceptions import BotDetection, PytubeFixError
@@ -173,29 +198,98 @@ def download_youtube(url: str, out_path: Path) -> Path:
     try:
         # The WEB client lets pytubefix generate a PO token automatically when needed.
         yt = YouTube(url, DEFAULT_YOUTUBE_CLIENT)
-        stream = yt.streams.filter(only_audio=True).first()
-        if not stream:
-            raise RuntimeError("No audio stream was available for this YouTube video.")
-        stream.download(output_path=str(out_path.parent), filename=out_path.name)
+        audio_stream = yt.streams.filter(only_audio=True).first()
     except BotDetection as error:
-        raise RuntimeError(
-            "YouTube blocked this runtime as automated traffic. "
-            "The downloader already uses pytubefix's WEB/automatic PO-token client; "
-            "try a non-datacenter network or a permitted proxy.",
-        ) from error
-    except PytubeFixError as error:
-        raise RuntimeError(f"YouTube audio download failed: {error}") from error
-    if not out_path.exists() or out_path.stat().st_size == 0:
-        raise RuntimeError("YouTube download failed or produced an empty file.")
-    print(f"✅ Downloaded: {out_path}")
-    return out_path
+        return use_local_video_fallback(
+            out_path,
+            "YouTube blocked this runtime as automated traffic before stream lookup.",
+        )
+    except (PytubeFixError, HTTPError, URLError) as error:
+        return use_local_video_fallback(out_path, f"YouTube stream lookup failed: {error}.")
+
+    if audio_stream:
+        try:
+            downloaded_audio = audio_stream.download(
+                output_path=str(out_path.parent),
+                filename="downloaded_audio",
+            )
+            if not downloaded_audio:
+                raise RuntimeError("Audio-only stream produced an empty file.")
+            raw_audio_path = Path(downloaded_audio)
+            if not raw_audio_path.is_file() or raw_audio_path.stat().st_size == 0:
+                raise RuntimeError("Audio-only stream produced an empty file.")
+            return convert_to_mp3(raw_audio_path, out_path)
+        except (PytubeFixError, HTTPError, URLError) as error:
+            print(f"⚠️  Audio-only download failed ({error}); trying video fallback.")
+        except RuntimeError as error:
+            if "Audio-only stream produced" not in str(error):
+                raise
+            print(f"⚠️  {error} Trying video fallback.")
+    else:
+        print("⚠️  No audio-only stream was available; trying video fallback.")
+
+    try:
+        video_stream = (
+            yt.streams.filter(progressive=True, file_extension="mp4")
+            .order_by("resolution")
+            .asc()
+            .first()
+        )
+    except BotDetection as error:
+        return use_local_video_fallback(
+            out_path,
+            "YouTube blocked this runtime as automated traffic before the video fallback.",
+        )
+    except (PytubeFixError, HTTPError, URLError) as error:
+        return use_local_video_fallback(out_path, f"YouTube video fallback lookup failed: {error}.")
+    if not video_stream:
+        return use_local_video_fallback(
+            out_path,
+            "YouTube did not offer an audio-only stream or a progressive MP4 fallback.",
+        )
+
+    try:
+        downloaded_video = video_stream.download(
+            output_path=str(out_path.parent),
+            filename="downloaded_video.mp4",
+        )
+    except (PytubeFixError, HTTPError, URLError) as error:
+        return use_local_video_fallback(out_path, f"YouTube video fallback download failed: {error}.")
+    if not downloaded_video:
+        return use_local_video_fallback(out_path, "YouTube video fallback produced an empty file.")
+    video_path = Path(downloaded_video)
+    if not video_path.is_file() or video_path.stat().st_size == 0:
+        return use_local_video_fallback(out_path, "YouTube video fallback produced an empty file.")
+    return convert_to_mp3(video_path, out_path)
 
 
 def resolve_youtube_source(youtube_url: str, data_dir: Path) -> Path:
-    """Download a validated YouTube URL and return the local media path."""
+    """Download a validated YouTube URL and return a normalized MP3 source."""
     if not is_youtube_url(youtube_url):
         sys.exit("❌ Input must be a valid YouTube URL for a single video.")
-    return download_youtube(youtube_url, data_dir / "downloaded.mp4")
+    return download_youtube(youtube_url, data_dir / "yt_source.mp3")
+
+
+def convert_to_mp3(source: Path, output: Path) -> Path:
+    """Extract or transcode a downloaded media file into MP3 for the rest of the pipeline."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-i", str(source),
+        "-vn",
+        "-codec:a", "libmp3lame",
+        "-q:a", "2",
+        str(output),
+    ]
+    print(f"⏳ Converting {source.name} → {output.name} (MP3)…")
+    run_command(command, "FFmpeg MP3 conversion failed")
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError(f"MP3 conversion failed: empty output {output}")
+    print(f"✅ MP3 source: {output}")
+    return output
 
 
 def convert_audio(
@@ -602,7 +696,7 @@ def align_canonical_lines(
 
     ensure_ffmpeg_available()
     data_dir.mkdir(parents=True, exist_ok=True)
-    source = download_youtube(youtube_url, data_dir / "downloaded.mp4")
+    source = download_youtube(youtube_url, data_dir / "yt_source.mp3")
     whisper_wav = convert_audio(
         source,
         data_dir / "yt_input.wav",
