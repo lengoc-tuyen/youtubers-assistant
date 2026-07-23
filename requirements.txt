@@ -1,6 +1,6 @@
 # Python dependencies for srt-maker.py
 # ffmpeg and ffprobe must also be installed separately and available on PATH.
-pytubefix
+yt-dlp
 stable-ts
 demucs
 librosa

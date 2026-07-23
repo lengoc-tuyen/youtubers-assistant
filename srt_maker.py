@@ -8,8 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from bilingual_models import AlignedLyricLine, CanonicalLyricLine
 
@@ -25,7 +24,6 @@ DEFAULT_LANGUAGE = "en"
 DEFAULT_DEMUCS_MODEL = "htdemucs"
 DEFAULT_DEMUCS_SEGMENT = 7
 DEFAULT_DEMUCS_OVERLAP = 0.25
-DEFAULT_YOUTUBE_CLIENT = "WEB"
 LOCAL_VIDEO_FALLBACK_NAME = "video.mp4"
 
 # Activity / subtitle clamping (from notebook)
@@ -35,13 +33,11 @@ DEFAULT_PAD = 0.06
 DEFAULT_MIN_ACTIVITY = 0.04
 DEFAULT_SUSPECT_DURATION = 5.0
 
-YOUTUBE_HOSTS = {
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
-    "www.youtu.be",
+SOUNDCLOUD_HOSTS = {
+    "soundcloud.com",
+    "www.soundcloud.com",
+    "m.soundcloud.com",
+    "on.soundcloud.com",
 }
 
 
@@ -139,29 +135,16 @@ def read_text_file(path: Path) -> str:
 
 
 # ------------------------------------------------------------
-# YouTube input
+# SoundCloud input
 # ------------------------------------------------------------
 
-def is_youtube_url(value: str) -> bool:
-    """Return whether value is an HTTP(S) URL for a single YouTube video."""
+def is_soundcloud_url(value: str) -> bool:
+    """Return whether value is an HTTP(S) URL for one SoundCloud track."""
     parsed = urlparse(value.strip())
     host = (parsed.hostname or "").lower()
-    if parsed.scheme not in {"http", "https"} or host not in YOUTUBE_HOSTS:
+    if parsed.scheme not in {"http", "https"} or host not in SOUNDCLOUD_HOSTS:
         return False
-
-    path = parsed.path.rstrip("/")
-    if host in {"youtu.be", "www.youtu.be"}:
-        video_id = path.lstrip("/")
-        return bool(video_id) and "/" not in video_id
-
-    if path == "/watch":
-        return bool(parse_qs(parsed.query).get("v", [""])[0])
-
-    if path.startswith("/shorts/"):
-        video_id = path.removeprefix("/shorts/")
-        return bool(video_id) and "/" not in video_id
-
-    return False
+    return bool(parsed.path.strip("/"))
 
 def find_local_video_fallback() -> Optional[Path]:
     """Find a user-uploaded ``video.mp4`` beside the runner or this script."""
@@ -173,7 +156,7 @@ def find_local_video_fallback() -> Optional[Path]:
 
 
 def use_local_video_fallback(out_path: Path, reason: str) -> Path:
-    """Transcode a user-provided MP4 after remote YouTube media is unavailable."""
+    """Transcode a user-provided MP4 after remote SoundCloud media is unavailable."""
     local_video = find_local_video_fallback()
     if local_video:
         print(f"⚠️  {reason} Using local fallback: {local_video}")
@@ -185,89 +168,54 @@ def use_local_video_fallback(out_path: Path, reason: str) -> Path:
     raise RuntimeError(f"{reason} No uploaded video.mp4 was found at: {locations}")
 
 
-def download_youtube(url: str, out_path: Path) -> Path:
-    """Use audio stream, remote MP4, then an uploaded ``video.mp4`` in that order."""
+def download_soundcloud(url: str, out_path: Path) -> Path:
+    """Extract a SoundCloud track to MP3 using yt-dlp and FFmpeg."""
     try:
-        from pytubefix import YouTube
-        from pytubefix.exceptions import BotDetection, PytubeFixError
+        from yt_dlp import YoutubeDL
     except ImportError:
-        raise RuntimeError("pytubefix is not installed. Run: pip install -r requirements.txt")
+        raise RuntimeError("yt-dlp is not installed. Run: pip install -r requirements.txt")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"⏳ Downloading audio from YouTube → {out_path}")
+    download_template = out_path.with_suffix(".%(ext)s")
+    options = {
+        "format": "bestaudio/best",
+        "outtmpl": str(download_template),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 3,
+        "fragment_retries": 3,
+        "socket_timeout": 30,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "0",
+        }],
+    }
+    print(f"⏳ Downloading SoundCloud audio with yt-dlp → {out_path}")
     try:
-        # The WEB client lets pytubefix generate a PO token automatically when needed.
-        yt = YouTube(url)
-        audio_stream = yt.streams.filter(only_audio=True).first()
-    except BotDetection as error:
+        with YoutubeDL(options) as downloader:
+            downloader.extract_info(url, download=True)
+    except Exception as error:
         return use_local_video_fallback(
             out_path,
-            "YouTube blocked this runtime as automated traffic before stream lookup.",
+            f"yt-dlp could not download this SoundCloud track: {error}.",
         )
-    except (PytubeFixError, HTTPError, URLError) as error:
-        return use_local_video_fallback(out_path, f"YouTube stream lookup failed: {error}.")
 
-    if audio_stream:
-        try:
-            downloaded_audio = audio_stream.download(
-                output_path=str(out_path.parent),
-                filename="downloaded_audio",
-            )
-            if not downloaded_audio:
-                raise RuntimeError("Audio-only stream produced an empty file.")
-            raw_audio_path = Path(downloaded_audio)
-            if not raw_audio_path.is_file() or raw_audio_path.stat().st_size == 0:
-                raise RuntimeError("Audio-only stream produced an empty file.")
-            return convert_to_mp3(raw_audio_path, out_path)
-        except (PytubeFixError, HTTPError, URLError) as error:
-            print(f"⚠️  Audio-only download failed ({error}); trying video fallback.")
-        except RuntimeError as error:
-            if "Audio-only stream produced" not in str(error):
-                raise
-            print(f"⚠️  {error} Trying video fallback.")
-    else:
-        print("⚠️  No audio-only stream was available; trying video fallback.")
-
-    try:
-        video_stream = (
-            yt.streams.filter(progressive=True, file_extension="mp4")
-            .order_by("resolution")
-            .asc()
-            .first()
-        )
-    except BotDetection as error:
+    if not out_path.is_file() or out_path.stat().st_size == 0:
         return use_local_video_fallback(
             out_path,
-            "YouTube blocked this runtime as automated traffic before the video fallback.",
+            "yt-dlp completed without a usable SoundCloud MP3 file.",
         )
-    except (PytubeFixError, HTTPError, URLError) as error:
-        return use_local_video_fallback(out_path, f"YouTube video fallback lookup failed: {error}.")
-    if not video_stream:
-        return use_local_video_fallback(
-            out_path,
-            "YouTube did not offer an audio-only stream or a progressive MP4 fallback.",
-        )
-
-    try:
-        downloaded_video = video_stream.download(
-            output_path=str(out_path.parent),
-            filename="downloaded_video.mp4",
-        )
-    except (PytubeFixError, HTTPError, URLError) as error:
-        return use_local_video_fallback(out_path, f"YouTube video fallback download failed: {error}.")
-    if not downloaded_video:
-        return use_local_video_fallback(out_path, "YouTube video fallback produced an empty file.")
-    video_path = Path(downloaded_video)
-    if not video_path.is_file() or video_path.stat().st_size == 0:
-        return use_local_video_fallback(out_path, "YouTube video fallback produced an empty file.")
-    return convert_to_mp3(video_path, out_path)
+    print(f"✅ MP3 source: {out_path}")
+    return out_path
 
 
-def resolve_youtube_source(youtube_url: str, data_dir: Path) -> Path:
-    """Download a validated YouTube URL and return a normalized MP3 source."""
-    if not is_youtube_url(youtube_url):
-        sys.exit("❌ Input must be a valid YouTube URL for a single video.")
-    return download_youtube(youtube_url, data_dir / "yt_source.mp3")
+def resolve_soundcloud_source(soundcloud_url: str, data_dir: Path) -> Path:
+    """Download a validated SoundCloud URL and return its normalized MP3 source."""
+    if not is_soundcloud_url(soundcloud_url):
+        sys.exit("❌ Input must be a valid SoundCloud track URL.")
+    return download_soundcloud(soundcloud_url, data_dir / "sc_source.mp3")
 
 
 def convert_to_mp3(source: Path, output: Path) -> Path:
@@ -281,7 +229,7 @@ def convert_to_mp3(source: Path, output: Path) -> Path:
         "-i", str(source),
         "-vn",
         "-codec:a", "libmp3lame",
-        "-q:a", "2",
+        "-q:a", "0",
         str(output),
     ]
     print(f"⏳ Converting {source.name} → {output.name} (MP3)…")
@@ -692,7 +640,7 @@ def load_canonical_sources_for_alignment(
 
 
 def align_canonical_lines(
-    youtube_url: str,
+    soundcloud_url: str,
     canonical_lines: Sequence[CanonicalLyricLine],
     *,
     data_dir: Path,
@@ -715,12 +663,12 @@ def align_canonical_lines(
     canonical_ids = tuple(line.id for line in canonical_lines)
     if len(set(canonical_ids)) != len(canonical_ids):
         raise AlignmentError("Canonical lyric IDs must be unique.")
-    if not is_youtube_url(youtube_url):
-        raise AlignmentError("Input must be a valid YouTube URL for a single video.")
+    if not is_soundcloud_url(soundcloud_url):
+        raise AlignmentError("Input must be a valid SoundCloud track URL.")
 
     ensure_ffmpeg_available()
     data_dir.mkdir(parents=True, exist_ok=True)
-    source = download_youtube(youtube_url, data_dir / "yt_source.mp3")
+    source = download_soundcloud(soundcloud_url, data_dir / "sc_source.mp3")
     whisper_wav = convert_audio(
         source,
         data_dir / "yt_input.wav",
@@ -799,13 +747,13 @@ def align_canonical_lines(
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Forced-align lyrics from a YouTube video and write line-by-line SRT.",
+        description="Forced-align lyrics from a SoundCloud track and write line-by-line SRT.",
     )
     p.add_argument(
-        "youtube_url",
+        "soundcloud_url",
         nargs="?",
-        metavar="YOUTUBE_URL",
-        help="YouTube video URL. If omitted, you will be prompted.",
+        metavar="SOUNDCLOUD_URL",
+        help="SoundCloud track URL. If omitted, you will be prompted.",
     )
     p.add_argument(
         "-l", "--lyrics",
@@ -868,14 +816,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    youtube_url = (args.youtube_url or "").strip()
-    if not youtube_url:
-        youtube_url = input("Enter YouTube video URL: ").strip()
-    if not youtube_url:
-        sys.exit("❌ No YouTube video URL provided.")
+    soundcloud_url = (args.soundcloud_url or "").strip()
+    if not soundcloud_url:
+        soundcloud_url = input("Enter SoundCloud track URL: ").strip()
+    if not soundcloud_url:
+        sys.exit("❌ No SoundCloud track URL provided.")
 
     try:
-        source = resolve_youtube_source(youtube_url, data_dir)
+        source = resolve_soundcloud_source(soundcloud_url, data_dir)
     except RuntimeError as error:
         sys.exit(f"❌ {error}")
 

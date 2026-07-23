@@ -62,7 +62,7 @@ LyricsLookup = Callable[[str, str], Optional[LRCLIBLyricsRecord]]
 
 @dataclass(frozen=True)
 class PipelineRequest:
-    youtube_url: str
+    soundcloud_url: str
     title: str
     artist: str
     vibe: str
@@ -305,7 +305,7 @@ class BilingualPipeline:
         lyrics_clean_path: Path,
     ) -> Tuple[Tuple[AlignedLyricLine, ...], dict[str, Any], bool]:
         cache_key = self._cache.key_for({
-            "youtube_url": request.youtube_url,
+            "soundcloud_url": request.soundcloud_url,
             "canonical_hash": canonical_hash,
             "aligner": self._cache_identity(self._aligner),
         })
@@ -335,7 +335,7 @@ class BilingualPipeline:
 
         run_key = cache_key[:16]
         lines, raw_alignment, _ = self._aligner(
-            request.youtube_url,
+            request.soundcloud_url,
             canonical_lines,
             data_dir=request.data_dir / run_key,
             raw_json_path=request.output_path.parent / "alignment_raw.json",
@@ -539,9 +539,9 @@ def build_pipeline_from_environment(cache_dir: Path) -> BilingualPipeline:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create English--Vietnamese lyric subtitles from a YouTube song.",
+        description="Create English--Vietnamese lyric subtitles from a SoundCloud track.",
     )
-    parser.add_argument("--youtube-url", required=True)
+    parser.add_argument("--soundcloud-url", required=True)
     parser.add_argument("--title", required=True)
     parser.add_argument("--artist", required=True)
     parser.add_argument("--vibe", required=True)
@@ -558,7 +558,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         pipeline = build_pipeline_from_environment(args.cache_dir)
         result = asyncio.run(pipeline.run(PipelineRequest(
-            youtube_url=args.youtube_url,
+            soundcloud_url=args.soundcloud_url,
             title=args.title,
             artist=args.artist,
             vibe=args.vibe,
