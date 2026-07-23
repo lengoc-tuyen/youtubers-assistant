@@ -74,6 +74,7 @@ class PipelineRequest:
 @dataclass(frozen=True)
 class PipelineResult:
     cues: Tuple[BilingualCue, ...]
+    lyrics_clean_path: Path
     output_en_path: Path
     output_bilingual_path: Path
     translation_path: Path
@@ -103,6 +104,7 @@ class BilingualPipeline:
         request.output_path.parent.mkdir(parents=True, exist_ok=True)
         record, lyrics_cache_hit = await self._load_lyrics(request)
         canonical_lines = canonicalize_lyrics(record.plain_lyrics)
+        lyrics_clean_path = self._write_clean_lyrics(request, canonical_lines)
         canonical_payload = self._canonical_payload(canonical_lines)
         canonical_hash = self._cache.key_for(canonical_payload)
 
@@ -111,6 +113,7 @@ class BilingualPipeline:
             request,
             canonical_lines,
             canonical_hash,
+            lyrics_clean_path,
         )
         translation_task = self._load_or_translate(
             request,
@@ -146,6 +149,7 @@ class BilingualPipeline:
             raw_alignment,
             record,
             canonical_hash,
+            lyrics_clean_path,
             warnings,
             {
                 "lyrics": lyrics_cache_hit,
@@ -154,7 +158,11 @@ class BilingualPipeline:
                 "groq": groq_cache_hit,
             },
         )
-        return PipelineResult(cues=cues, **artifact_paths)
+        return PipelineResult(
+            cues=cues,
+            lyrics_clean_path=lyrics_clean_path,
+            **artifact_paths,
+        )
 
     async def _shorten_overlong_cues(
         self,
@@ -294,6 +302,7 @@ class BilingualPipeline:
         request: PipelineRequest,
         canonical_lines: Sequence[CanonicalLyricLine],
         canonical_hash: str,
+        lyrics_clean_path: Path,
     ) -> Tuple[Tuple[AlignedLyricLine, ...], dict[str, Any], bool]:
         cache_key = self._cache.key_for({
             "youtube_url": request.youtube_url,
@@ -330,6 +339,7 @@ class BilingualPipeline:
             canonical_lines,
             data_dir=request.data_dir / run_key,
             raw_json_path=request.output_path.parent / "alignment_raw.json",
+            lyrics_path=lyrics_clean_path,
         )
         self._ensure_alignment_ids(canonical_lines, lines)
         self._cache.put("alignment", cache_key, {
@@ -346,6 +356,7 @@ class BilingualPipeline:
         raw_alignment: Mapping[str, Any],
         record: LRCLIBLyricsRecord,
         canonical_hash: str,
+        lyrics_clean_path: Path,
         warnings: Sequence[Any],
         cache_hits: Mapping[str, bool],
     ) -> Mapping[str, Path]:
@@ -373,6 +384,7 @@ class BilingualPipeline:
                 "duration": record.duration,
             },
             "canonical_hash": canonical_hash,
+            "canonical_lyrics_file": str(lyrics_clean_path),
             "groq_prompt_version": GROQ_PROMPT_VERSION,
             "cache_hits": dict(cache_hits),
             "warnings": [asdict(warning) for warning in warnings],
@@ -383,6 +395,19 @@ class BilingualPipeline:
             "translation_path": translation_path,
             "metadata_path": metadata_path,
         }
+
+    @staticmethod
+    def _write_clean_lyrics(
+        request: PipelineRequest,
+        canonical_lines: Sequence[CanonicalLyricLine],
+    ) -> Path:
+        """Persist the one canonical LRCLIB lyric text before Whisper reads it."""
+        lyrics_clean_path = request.output_path.parent / "lyrics_clean.txt"
+        atomic_write_text(
+            lyrics_clean_path,
+            "\n".join(line.source for line in canonical_lines) + "\n",
+        )
+        return lyrics_clean_path
 
     @staticmethod
     def _canonical_payload(lines: Sequence[CanonicalLyricLine]) -> Mapping[str, Any]:
@@ -547,6 +572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     print(f"✅ English SRT: {result.output_en_path}")
     print(f"✅ Bilingual SRT: {result.output_bilingual_path}")
+    print(f"✅ Clean LRCLIB lyrics: {result.lyrics_clean_path}")
     print(f"✅ Metadata: {result.metadata_path}")
     return 0
 

@@ -668,12 +668,36 @@ def ensure_ffmpeg_available() -> None:
         raise AlignmentError("ffmpeg and ffprobe must be available on PATH.")
 
 
+def load_canonical_sources_for_alignment(
+    canonical_lines: Sequence[CanonicalLyricLine],
+    lyrics_path: Optional[Path],
+) -> Tuple[str, ...]:
+    """Read the persisted clean lyrics used as Stable Whisper's exact input."""
+    expected_sources = tuple(line.source for line in canonical_lines)
+    if lyrics_path is None:
+        return expected_sources
+
+    try:
+        persisted_sources = tuple(read_text_file(lyrics_path).splitlines())
+    except OSError as exc:
+        raise AlignmentError(
+            f"Saved clean lyrics file could not be read: {lyrics_path}"
+        ) from exc
+
+    if persisted_sources != expected_sources:
+        raise AlignmentError(
+            "Saved clean lyrics do not match the canonical LRCLIB lyric lines."
+        )
+    return persisted_sources
+
+
 def align_canonical_lines(
     youtube_url: str,
     canonical_lines: Sequence[CanonicalLyricLine],
     *,
     data_dir: Path,
     raw_json_path: Path,
+    lyrics_path: Optional[Path] = None,
     model_size: str = DEFAULT_WHISPER_MODEL,
     language: str = DEFAULT_LANGUAGE,
     use_demucs: bool = True,
@@ -723,7 +747,11 @@ def align_canonical_lines(
         except Exception as exc:
             print(f"⚠️  Demucs failed ({exc}); falling back to full mix for activity.")
 
-    lyrics_text = "\n".join(line.source for line in canonical_lines)
+    lyrics_sources = load_canonical_sources_for_alignment(
+        canonical_lines,
+        lyrics_path,
+    )
+    lyrics_text = "\n".join(lyrics_sources)
     raw_result = run_alignment(
         whisper_wav,
         lyrics_text,
@@ -732,7 +760,7 @@ def align_canonical_lines(
         raw_json_path=raw_json_path,
     )
     line_items, _, bad_lines = build_line_items(
-        tuple(line.source for line in canonical_lines),
+        lyrics_sources,
         extract_words(raw_result),
     )
     if bad_lines or len(line_items) != len(canonical_lines):
