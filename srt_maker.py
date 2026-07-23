@@ -197,7 +197,7 @@ def download_youtube(url: str, out_path: Path) -> Path:
     print(f"⏳ Downloading audio from YouTube → {out_path}")
     try:
         # The WEB client lets pytubefix generate a PO token automatically when needed.
-        yt = YouTube(url, DEFAULT_YOUTUBE_CLIENT)
+        yt = YouTube(url)
         audio_stream = yt.streams.filter(only_audio=True).first()
     except BotDetection as error:
         return use_local_video_fallback(
