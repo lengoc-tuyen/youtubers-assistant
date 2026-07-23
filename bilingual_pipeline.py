@@ -58,6 +58,7 @@ Aligner = Callable[
     Tuple[Tuple[AlignedLyricLine, ...], dict[str, Any], Tuple[tuple, ...]],
 ]
 LyricsLookup = Callable[[str, str], Optional[LRCLIBLyricsRecord]]
+LRCLIB_LYRICS_CACHE_VERSION = "line-breaks-v2"
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ class BilingualPipeline:
     ) -> Tuple[LRCLIBLyricsRecord, bool]:
         key = self._cache.key_for({
             "provider": "lrclib",
+            "cache_version": LRCLIB_LYRICS_CACHE_VERSION,
             "title": request.title,
             "artist": request.artist,
         })
@@ -483,8 +485,16 @@ class BilingualPipeline:
     ) -> None:
         expected_ids = [line.id for line in lines]
         actual_ids = [line.id for line in aligned]
-        if actual_ids != expected_ids or any(line.end <= line.start for line in aligned):
-            raise RuntimeError("Alignment IDs or timing did not match canonical lines exactly.")
+        expected_sources = [line.source for line in lines]
+        actual_sources = [line.source for line in aligned]
+        if (
+            actual_ids != expected_ids
+            or actual_sources != expected_sources
+            or any(line.end <= line.start for line in aligned)
+        ):
+            raise RuntimeError(
+                "Alignment IDs, source lines, or timing did not match canonical lyrics exactly."
+            )
 
 
 def load_dotenv_file(path: Path) -> None:
